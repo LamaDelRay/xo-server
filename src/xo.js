@@ -24,9 +24,10 @@ import {Groups} from './models/group'
 import {Jobs} from './models/job'
 import {JsonRpcError, NoSuchObject} from './api-errors'
 import {ModelAlreadyExists} from './collection'
+import {Remotes} from './models/remote'
+import {Schedules} from './models/schedule'
 import {Servers} from './models/server'
 import {Tokens} from './models/token'
-import {Schedules} from './models/schedule'
 
 // ===================================================================
 
@@ -63,6 +64,12 @@ class NoSuchSchedule extends NoSuchObject {
 class NoSuchJob extends NoSuchObject {
   constructor (id) {
     super(id, 'job')
+  }
+}
+
+class NoSuchRemote extends NoSuchObject {
+  constructor (id) {
+    super(id, 'remote')
   }
 }
 
@@ -142,6 +149,11 @@ export default class Xo extends EventEmitter {
       connection: redis,
       prefix: 'xo:schedule',
       indexes: ['user_id', 'job']
+    })
+    this._remotes = new Remotes({
+      connection: redis,
+      prefix: 'xo:remote',
+      indexes: ['enabled']
     })
 
     // Proxies tokens/users related events to XO and removes tokens
@@ -527,6 +539,72 @@ export default class Xo extends EventEmitter {
     await this._schedules.remove(id)
     if (this.scheduler) {
       this.scheduler.remove(id)
+    }
+  }
+
+  // -----------------------------------------------------------------
+
+  async getAllRemotes () {
+    return await this._remotes.get()
+  }
+
+  async _getRemote (id) {
+    const remote = await this._remotes.first(id)
+    if (!remote) {
+      throw new NoSuchRemote(id)
+    }
+
+    return remote
+  }
+
+  async getRemote (id) {
+    return (await this._getRemote(id)).properties
+  }
+
+  async createRemote ({name, url}) {
+    let remote = await this._remotes.create(name, url)
+    return await this.updateRemote(remote.id, {enabled: true})
+  }
+
+  async updateRemote (id, {name, url, enabled, error}) {
+    const props = await this.remoteHandler.sync({name, url, enabled, error})
+    const remote = await this._getRemote(id)
+    this._updateRemote(remote, props)
+
+    return await this._remotes.save(remote).properties
+  }
+
+  _updateRemote (remote, {name, url, enabled, error}) {
+    if (name) remote.set('name', name)
+    if (url) remote.set('url', url)
+    if (enabled !== undefined) remote.set('enabled', enabled)
+    if (error) {
+      remote.set('error', error)
+    } else {
+      remote.set('error', '')
+    }
+  }
+
+  async removeRemote (id) {
+    const remote = await this.getRemote(id)
+    await this.remoteHandler.forget(remote)
+    await this._remotes.remove(id)
+  }
+
+  async syncAllRemotes () {
+    const remotes = await this.getAllRemotes()
+    forEach(remotes, remote => this.updateRemote(remote.id, {}))
+  }
+
+  async disableAllRemotes () {
+    const remotes = await this.getAllRemotes()
+    this.remoteHandler.disableAll(remotes)
+  }
+
+  async initRemotes () {
+    const remotes = await this.getAllRemotes()
+    if (!remotes || !remotes.length) {
+      await this.createRemote({name: 'default', url: 'file://var/lib/xoa-backups'})
     }
   }
 

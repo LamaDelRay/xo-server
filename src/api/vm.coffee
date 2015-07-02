@@ -1,4 +1,5 @@
 $debug = (require 'debug') 'xo:api:vm'
+$filter = require 'lodash.filter'
 $findIndex = require 'lodash.findindex'
 $findWhere = require 'lodash.find'
 $forEach = require 'lodash.foreach'
@@ -6,8 +7,12 @@ $isArray = require 'lodash.isarray'
 $request = require('bluebird').promisify(require('request'))
 $result = require 'lodash.result'
 endsWith = require 'lodash.endswith'
+escapeStringRegexp = require 'escape-string-regexp'
+eventToPromise = require 'event-to-promise'
+fs = require('fs-extra')
 map = require 'lodash.map'
 startsWith = require 'lodash.startswith'
+sortBy = require 'lodash.sortby'
 {coroutine: $coroutine} = require 'bluebird'
 
 {
@@ -15,6 +20,8 @@ startsWith = require 'lodash.startswith'
   parseXml,
   pFinally
 } = require '../utils'
+
+Bluebird.promisifyAll(fs)
 
 $isVMRunning = do ->
   runningStates = {
@@ -471,9 +478,9 @@ rollingSnapshot = $coroutine ({vm, tag, depth}) ->
   return snapshot.$id
 
 rollingSnapshot.params = {
-  id: { type: 'string'}
-  tag: {type: 'string'}
-  depth: {type: 'number'}
+  id: { type: 'string' }
+  tag: { type: 'string' }
+  depth: { type: 'number' }
 }
 
 rollingSnapshot.resolve = {
@@ -483,6 +490,66 @@ rollingSnapshot.resolve = {
 rollingSnapshot.description = 'Snaphots a VM with a tagged name, and removes the oldest snapshot with the same tag according to depth'
 
 exports.rollingSnapshot = rollingSnapshot
+
+#---------------------------------------------------------------------
+
+backup = $coroutine ({vm, path, compress}) ->
+  yield fs.ensureDirAsync(path)
+  targetStream = fs.createWriteStream(path, {flag: 'wx'})
+  sourceStream = yield @getXAPI(vm).exportVm(vm.id, {compress: compress ? true})
+  sourceStream.pipe(targetStream)
+  yield eventToPromise(targetStream, 'finish')
+
+backup.params = {
+  id: { type: 'string' }
+  path: { type: 'string' }
+  compress: { type: 'boolean', optional: true }
+}
+
+backup.resolve = {
+  vm: ['id', 'VM', 'adminsistrate']
+}
+
+backup.description = 'Exports a VM to the file system'
+
+exports.backup = backup
+
+#---------------------------------------------------------------------
+
+rollingBackup = $coroutine ({vm, path, tag, depth, compress}) ->
+  files = yield fs.readdirAsync(path)
+
+  reg = new RegExp('^[^_]+_' + escapeStringRegexp(tag))
+  backups = sortBy($filter(files, (fileName) -> reg.test(fileName)))
+
+  date = new Date().toISOString()
+  backupFullPath = "#{path}/#{date}_#{tag}_#{vm.name_label}.xva"
+
+  yield backup({vm, path, compress})
+
+  promises = []
+  for surplus in [(backups.length + 1 - depth)..1] by -1
+    oldBackup = backups.shift()
+    promises.push fs.unlinkAsync("#{path}/#{oldBackup}")
+  yield Bluebird.all promises
+
+  return backupFullPath
+
+rollingBackup.params = {
+  id: { type: 'string' }
+  path: { type: 'string' }
+  tag: { type: 'string'}
+  depth: { type: 'number' }
+  compress: { type: 'boolean', optional: true }
+}
+
+rollingBackup.resolve = {
+  vm: ['id', ['VM', 'VM-snapshot'], 'administrate']
+}
+
+rollingBackup.description = 'Exports a VM to the file system with a tagged name, and removes the oldest backup with the same tag according to depth'
+
+exports.rollingBackup = rollingBackup
 
 #---------------------------------------------------------------------
 
